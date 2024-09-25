@@ -1,0 +1,20 @@
+[package]
+name = "bvr_web_pup"
+version = "0.2.0"
+edition = "2021"
+
+[[bin]]
+name = "BvrWebPup"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7.5"
+axum-extra = { version = "0.9.3", features = ["multipart"] }
+bvr_detect = { version = "0.2.0", path = "../bvr_detect" }
+image = "0.25.2"
+serde = { version = "1.0.210", features = ["derive"] }
+tokio = { version = "1.40.0", features = ["full"] }
+tracing-subscriber = "0.3.18"
+serde_json = "1.0.128"
+chrono = "0.4.38"
+clap = { version = "4.5.17", features = ["derive"] }
