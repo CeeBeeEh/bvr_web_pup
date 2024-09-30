@@ -72,7 +72,8 @@ struct Cli {
 #[derive(Debug, Serialize)]
 struct Results {
     success: bool,
-    inferenceMs: u32,
+    #[serde(rename="@inferenceMs")]
+    inference_ms: u32,
     count: u32,
     predictions: Vec<BasicDetectionResults>
 }
@@ -250,7 +251,7 @@ async fn detect(mut multipart: Multipart) -> String {
         if detections.is_empty() {
             let empty_results = Results {
                 success: true,
-                inferenceMs: 0,
+                inference_ms: 0,
                 count: 0,
                 predictions: Vec::new(),
             };
@@ -282,7 +283,7 @@ async fn detect(mut multipart: Multipart) -> String {
 
         let results = Results {
             success: true,
-            inferenceMs: detection_time as u32,
+            inference_ms: detection_time as u32,
             count: prediction_results.len() as u32,
             predictions: prediction_results,
         };
