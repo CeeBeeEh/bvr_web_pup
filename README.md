@@ -1,5 +1,5 @@
 <div style="float: right; margin-left: 20px;">
-  <img alt="BVR Chirp Logo" src="logo.png" width="380" />
+  <img alt="BVR Chirp Logo" src="logo.png" width="240" />
 </div>
 
 # bvr_web_pup
