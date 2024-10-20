@@ -7,8 +7,7 @@ use axum::{
 };
 use axum_extra::extract::Multipart;
 use BvrDetect::{self, bvr_detect};
-use BvrDetect::bvr_data;
-use BvrDetect::bvr_data::{ProcessingType, DeviceType, ModelConfig};
+use BvrDetect::data::{BvrImage, DeviceType, ModelConfig, ProcessingType, YoloVersion};
 use clap::Parser;
 use serde::Serialize;
 use tokio::sync::Mutex;
@@ -16,14 +15,16 @@ use tokio::time::Instant;
 
 static MODEL_CONFIG: LazyLock<Mutex<ModelConfig>> = LazyLock::new(|| Mutex::new({
     ModelConfig {
-        onnx_path: String::new(),
+        weights_path: String::new(),
         ort_lib_path: String::new(),
-        classes_path: String::new(),
+        labels_path: String::new(),
         device_type: Default::default(),
-        detector_type: Default::default(),
-        threshold: 0.4,
+        processing_type: Default::default(),
+        yolo_version: Default::default(),
+        conf_threshold: 0.3,
         width: 640,
         height: 640,
+        split_wide_input: false,
     }
 }));
 
@@ -48,9 +49,17 @@ struct Cli {
     #[arg(short, long, default_value = "cpu")]
     device: String,
 
-    /// Detection processing method to use. Either built-in onnxruntime or external python script. Options are [native, python]
-    #[arg(short='r', long, default_value = "native")]
+    /// Detection processing method to use. Either built-in onnxruntime or external python script. Options are [ort, torch, python]
+    #[arg(short='r', long, default_value = "ort")]
     processing_type: String,
+
+    /// Set Yolo version. Options are [v5, v6, v7, v8, v9, v10, v11]
+    #[arg(short, long, default_value = "v11")]
+    yolo_version: String,
+
+    /// Split extra wide images to process each half individually
+    #[arg[short, long, action]]
+    split_wide: bool,
 
     /// Override detection threshold
     #[arg(short, long, default_value_t = 0.4)]
@@ -67,6 +76,10 @@ struct Cli {
     /// The port that should be used
     #[arg(short, long, default_value_t = 3000)]
     port: u16,
+
+    /// Set logging level
+    #[arg(long, default_value = "info")]
+    log_level: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -95,30 +108,38 @@ struct BasicDetectionResults {
 async fn main() {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt::init();
+    match cli.log_level.to_lowercase().as_str() {
+        "trace" => simple_logger::init_with_level(log::Level::Trace).unwrap(),
+        "debug" => simple_logger::init_with_level(log::Level::Debug).unwrap(),
+        "warn" => simple_logger::init_with_level(log::Level::Warn).unwrap(),
+        "error" => simple_logger::init_with_level(log::Level::Error).unwrap(),
+        _ => simple_logger::init_with_level(log::Level::Info).unwrap(),
+    }
 
     let mut model_config = MODEL_CONFIG.lock().await;
 
-    model_config.onnx_path = cli.model_path.to_string();
-    model_config.classes_path = cli.classes_path.to_string();
+    model_config.weights_path = cli.model_path.to_string();
+    model_config.labels_path = cli.classes_path.to_string();
     model_config.ort_lib_path = cli.lib_path_ort.to_string();
-    model_config.threshold = if cli.threshold > 1.0 { cli.threshold / 100.0 } else { cli.threshold };
+    model_config.yolo_version = YoloVersion::from(cli.yolo_version);
+    model_config.conf_threshold = if cli.threshold > 1.0 { cli.threshold / 100.0 } else { cli.threshold };
+    model_config.split_wide_input = cli.split_wide;
     model_config.width = cli.width;
     model_config.height = cli.height;
 
     match ProcessingType::from_str(cli.processing_type.as_str()) {
-        Some(ProcessingType::Native) => model_config.detector_type = ProcessingType::Native,
-        Some(ProcessingType::Python) => model_config.detector_type = ProcessingType::Python,
+        Some(ProcessingType::ORT) => model_config.processing_type = ProcessingType::ORT,
+        Some(ProcessingType::Python) => model_config.processing_type = ProcessingType::Python,
         _ => {
             println!("Unknown choice for processing type: {}\nDefaulting to 'Native'", cli.processing_type);
-            model_config.detector_type = ProcessingType::Native
+            model_config.processing_type = ProcessingType::ORT
         }
     }
 
-    match DeviceType::from_str(cli.device.as_str()) {
+    match DeviceType::from_str(cli.device.as_str(), 0) {
         Some(DeviceType::CPU) => model_config.device_type = DeviceType::CPU,
-        Some(DeviceType::CUDA) => model_config.device_type = DeviceType::CUDA,
-        Some(DeviceType::TensorRT) => model_config.device_type = DeviceType::TensorRT,
+        Some(DeviceType::CUDA(0)) => model_config.device_type = DeviceType::CUDA(0),
+        Some(DeviceType::TensorRT(0)) => model_config.device_type = DeviceType::TensorRT(0),
         _ => {
             println!("Unknown device for execution provider: {}\nDefaulting to 'CPU'", cli.device);
             model_config.device_type = DeviceType::CPU
@@ -223,7 +244,7 @@ async fn detect(mut multipart: Multipart) -> String {
         let img_width = image.width() as i32;
         let img_height = image.height() as i32;
 
-        let bvr_image = bvr_data::BvrImage {
+        let bvr_image = BvrImage {
             image,
             img_width,
             img_height,
@@ -232,17 +253,7 @@ async fn detect(mut multipart: Multipart) -> String {
         };
 
         if !bvr_detect::is_running().await.unwrap() {
-            let model_init = ModelConfig {
-                onnx_path: model_config.onnx_path.clone(),
-                ort_lib_path: model_config.ort_lib_path.clone(),
-                classes_path: model_config.classes_path.clone(),
-                device_type: model_config.device_type,
-                detector_type: Default::default(),
-                threshold: model_config.threshold,
-                width: model_config.width,
-                height: model_config.height,
-            };
-            bvr_detect::init_detector(model_init, false).await;
+            bvr_detect::init_detector(model_config.clone(), false).await;
         }
 
         let detections = bvr_detect::detect(bvr_image).await.expect("Error processing detection");
@@ -269,13 +280,14 @@ async fn detect(mut multipart: Multipart) -> String {
         let mut prediction_results: Vec<BasicDetectionResults> = Vec::new();
 
         for detect in detections {
+            let (x1, y1, x2, y2) = detect.bbox.as_x1y1_x2y2_i32();
             let bi_result = BasicDetectionResults {
-                label: detect.label,
+                label: detect.label.unwrap_or("unknown".to_string()),
                 confidence: detect.confidence,
-                x_min: detect.bbox.x1,
-                x_max: detect.bbox.x2,
-                y_min: detect.bbox.y1,
-                y_max: detect.bbox.y2,
+                x_min: x1,
+                x_max: x2,
+                y_min: y1,
+                y_max: y2,
             };
 
             prediction_results.push(bi_result);
